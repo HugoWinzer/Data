@@ -10,6 +10,7 @@ substitutions:
   _BATCH_SIZE: "200"
   _CONCURRENCY: "8"
   _RUN_SA: "rfp-enricher-sa@rfp-database-464609.iam.gserviceaccount.com"
+  _TAG: "manual"  # will be overridden per-build
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -21,7 +22,7 @@ steps:
       [
         "build",
         "-t",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${BUILD_ID}",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${_TAG}",
         ".",
       ]
 
@@ -30,10 +31,10 @@ steps:
     args:
       [
         "push",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${BUILD_ID}",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${_TAG}",
       ]
 
-  # 3) Add city/country columns (inline SQL; no $SQL var)
+  # 3) Add city/country columns (inline SQL; **no** $SQL var)
   - name: "gcr.io/cloud-builders/gcloud"
     entrypoint: "bash"
     args:
@@ -49,7 +50,7 @@ steps:
     args:
       [
         "run","deploy","${_SERVICE}",
-        "--image","${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${BUILD_ID}",
+        "--image","${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${_TAG}",
         "--region","${_REGION}",
         "--platform","managed",
         "--allow-unauthenticated",
@@ -64,5 +65,5 @@ steps:
       ]
 
 images:
-  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${BUILD_ID}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${_TAG}"
 YAML
