@@ -1,4 +1,4 @@
-# file: cloudbuild.yaml
+cat > cloudbuild.yaml <<'YAML'
 substitutions:
   _REGION: "us-central1"
   _SERVICE: "venue-enricher"
@@ -14,20 +14,24 @@ options:
   logging: CLOUD_LOGGING_ONLY
 
 steps:
+  # 1) Build & push image
   - name: "gcr.io/cloud-builders/docker"
-    args: [
-      "build",
-      "-t","${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
-      ".",
-    ]
+    args:
+      [
+        "build",
+        "-t",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
+        ".",
+      ]
 
   - name: "gcr.io/cloud-builders/docker"
-    args: [
-      "push",
-      "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
-    ]
+    args:
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
+      ]
 
-  # Migration without $SQL variable
+  # 2) Migration: add columns (inline query; no $SQL variable)
   - name: "gcr.io/cloud-builders/gcloud"
     entrypoint: "bash"
     args:
@@ -38,22 +42,25 @@ steps:
          ADD COLUMN IF NOT EXISTS city STRING,
          ADD COLUMN IF NOT EXISTS country STRING"
 
+  # 3) Deploy to Cloud Run
   - name: "gcr.io/cloud-builders/gcloud"
-    args: [
-      "run","deploy","${_SERVICE}",
-      "--image","${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
-      "--region","${_REGION}",
-      "--platform","managed",
-      "--allow-unauthenticated",
-      "--min-instances","0",
-      "--max-instances","3",
-      "--cpu","1",
-      "--memory","512Mi",
-      "--timeout","3600",
-      "--service-account","${_RUN_SA}",
-      "--set-env-vars","PROJECT_ID=${PROJECT_ID},DATASET_ID=${_DATASET},TABLE_ID=${_TABLE},OPENAI_MODEL=${_OPENAI_MODEL},BATCH_SIZE=${_BATCH_SIZE},CONCURRENCY=${_CONCURRENCY}",
-      "--set-secrets","OPENAI_API_KEY=OPENAI_API_KEY:latest",
-    ]
+    args:
+      [
+        "run","deploy","${_SERVICE}",
+        "--image","${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
+        "--region","${_REGION}",
+        "--platform","managed",
+        "--allow-unauthenticated",
+        "--min-instances","0",
+        "--max-instances","3",
+        "--cpu","1",
+        "--memory","512Mi",
+        "--timeout","3600",
+        "--service-account","${_RUN_SA}",
+        "--set-env-vars","PROJECT_ID=${PROJECT_ID},DATASET_ID=${_DATASET},TABLE_ID=${_TABLE},OPENAI_MODEL=${_OPENAI_MODEL},BATCH_SIZE=${_BATCH_SIZE},CONCURRENCY=${_CONCURRENCY}",
+        "--set-secrets","OPENAI_API_KEY=OPENAI_API_KEY:latest",
+      ]
 
 images:
   - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}"
+YAML
