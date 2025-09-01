@@ -1,10 +1,10 @@
 # file: cloudbuild.yaml
 substitutions:
-  _REGION: "us-central1"                        # change if needed
-  _SERVICE: "venue-enricher"                    # Cloud Run service name
+  _REGION: "us-central1"
+  _SERVICE: "venue-enricher"
   _DATASET: "rfpdata"
   _TABLE: "OUTPUT"
-  _REPOSITORY: "app"                            # Artifact Registry repo name
+  _REPOSITORY: "app"
   _OPENAI_MODEL: "gpt-4o-mini"
   _BATCH_SIZE: "200"
   _CONCURRENCY: "8"
@@ -14,23 +14,15 @@ options:
   logging: CLOUD_LOGGING_ONLY
 
 steps:
-  # 1) Build + push
   - name: "gcr.io/cloud-builders/docker"
-    args:
-      [
-        "build",
-        "-t",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
-        ".",
-      ]
-  - name: "gcr.io/cloud-builders/docker"
-    args:
-      [
-        "push",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
-      ]
+    args: ["build",
+      "-t","${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
+      "."]
 
-  # 2) Migration: add `city` and `country`
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["push",
+      "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}"]
+
   - name: "gcr.io/cloud-builders/gcloud"
     entrypoint: "bash"
     args:
@@ -42,7 +34,6 @@ steps:
              ADD COLUMN IF NOT EXISTS country STRING"
         bq query --use_legacy_sql=false "$SQL"
 
-  # 3) Deploy to Cloud Run
   - name: "gcr.io/cloud-builders/gcloud"
     args:
       [
@@ -62,4 +53,4 @@ steps:
       ]
 
 images:
-  - "${_REGIO_
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}"
