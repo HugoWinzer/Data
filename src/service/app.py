@@ -9,7 +9,7 @@ from venue_enricher.cache import EnrichmentCache
 from venue_enricher.enricher import enrich_rows
 from venue_enricher import io_bigquery as bqio
 
-app = FastAPI(title="Venue City/Country Enricher", version="1.1.0")
+app = FastAPI(title="Venue City/Country Enricher", version="1.2.0")
 cfg = Settings()
 
 
@@ -36,7 +36,7 @@ def stats():
 def run_enrichment(
     limit: int = Query(30000, ge=1, le=100000),
     overwrite: bool = Query(False),
-    verbose: bool = Query(True),  # default True so you see per-row JSON without changing the call
+    verbose: bool = Query(True),
 ):
     if not (cfg.project_id and cfg.dataset_id and cfg.table_id):
         raise HTTPException(status_code=500, detail="PROJECT_ID/DATASET_ID/TABLE_ID must be set")
@@ -57,10 +57,11 @@ def run_enrichment(
 
     updated_total = 0
     start = 0
-    batch_size = cfg.batch_size
+    batch_size = cfg.batch_size  # 200 by env
     while start < len(updates):
         chunk = updates[start : start + batch_size]
-        updated_total += bqio.update_locations(cfg.project_id, cfg.dataset_id, cfg.table_id, chunk)
+        affected = bqio.update_locations(cfg.project_id, cfg.dataset_id, cfg.table_id, chunk)
+        updated_total += affected
         start += batch_size
 
     return {"updated": updated_total, "limit": limit, "batch_size": batch_size}
