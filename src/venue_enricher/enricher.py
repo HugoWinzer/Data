@@ -1,77 +1,133 @@
-# file: src/venue_enricher/enricher.py
+# path: src/venue_enricher/enricher.py
 from __future__ import annotations
-from typing import Any, Dict, Iterable, List
-from dataclasses import dataclass
-import json
 
-from .gpt_client import GPTClient, LocationResult
-from .cache import EnrichmentCache
+import os
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, Any, Iterable, List, Tuple, Optional
 
-
-@dataclass
-class EnrichStats:
-    processed: int = 0
-    from_cache: int = 0
-    api_calls: int = 0
+try:
+    from openai import OpenAI  # lazy import handling below
+except Exception:  # pragma: no cover
+    OpenAI = None  # type: ignore
 
 
-def _log(event: str, **fields: Any) -> None:
-    # One-line JSON; easy to filter in Cloud Logging
-    try:
-        print(json.dumps({"event": event, **fields}, ensure_ascii=False))
-    except Exception:
-        print(f"{event} {fields}")
+CITY_HINTS = re.compile(
+    r"\b(?:city|town|municipality|locality|metropolis|ville)\b", re.I
+)
+COUNTRY_WORDS = {
+    "usa": "United States",
+    "u.s.a.": "United States",
+    "us": "United States",
+    "u.s.": "United States",
+    "uk": "United Kingdom",
+    "u.k.": "United Kingdom",
+    "uae": "United Arab Emirates",
+    "u.a.e.": "United Arab Emirates",
+}
 
 
-def enrich_rows(
+def _fallback_extract(name: str, address: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Heuristic extractor used when no OpenAI key is present or model fails.
+    Why: Keeps pipeline productive even under rate/availability issues.
+    """
+    text = f"{name or ''} | {address or ''}".strip()
+    if not text:
+        return None, None
+
+    # Country detection from trailing token / known acronyms
+    parts = [p.strip(", ") for p in text.split(",") if p.strip()]
+    country = None
+    if parts:
+        tail = parts[-1].lower()
+        country = COUNTRY_WORDS.get(tail)
+        if not country and len(tail) > 3:
+            country = tail.title() if " " in tail else None
+
+    # City: prefer penultimate token if present
+    city = None
+    if len(parts) >= 2:
+        cand = parts[-2].strip()
+        if cand and not CITY_HINTS.search(cand):
+            city = cand
+
+    return city, country
+
+
+def _openai_client() -> Optional["OpenAI"]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key or OpenAI is None:
+        return None
+    return OpenAI(api_key=api_key)
+
+
+def _ask_model(client: "OpenAI", model: str, name: str, address: str) -> Tuple[Optional[str], Optional[str]]:
+    prompt = (
+        "Extract city and country from the venue data. "
+        "Return strictly JSON with keys city and country. "
+        f"Name: {name!r}\nAddress: {address!r}"
+    )
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You return only strict JSON."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.0,
+    )
+    content = resp.choices[0].message.content.strip()
+    # Minimal parse without extra deps
+    city, country = None, None
+    m_city = re.search(r'"city"\s*:\s*"([^"]*)"', content)
+    m_country = re.search(r'"country"\s*:\s*"([^"]*)"', content)
+    if m_city:
+        city = m_city.group(1).strip() or None
+    if m_country:
+        country = m_country.group(1).strip() or None
+    return city, country
+
+
+def enrich_batch(
     rows: Iterable[Dict[str, Any]],
-    client: GPTClient,
-    cache: EnrichmentCache,
-    overwrite: bool = False,
-    verbose: bool = True,
+    model: str,
+    concurrency: int = 8,
+    verbose: bool = False,
 ) -> List[Dict[str, Any]]:
-    row_list = list(rows)
-    updates: List[Dict[str, Any]] = []
-    stats = EnrichStats()
-    memo: Dict[str, LocationResult] = {}
+    """
+    Returns [{id, city, country}, ...].
+    Why: Keep API payload small and let BigQuery do the merge.
+    """
+    client = _openai_client()
+    results: List[Dict[str, Any]] = []
 
-    if verbose:
-        _log("enrich_start", total=len(row_list), model=client.model)
+    def _enrich_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        rid = row.get("id")
+        name = row.get("name") or ""
+        address = row.get("address") or ""
+        city, country = None, None
 
-    for row in row_list:
-        stats.processed += 1
-        row_id = row.get("id")
-        name = (row.get("name") or "")[:200]
-        key = cache.make_key(row)
-
-        if not overwrite:
-            cached = cache.get(key)
-            if cached:
-                city, country, confidence, _ = cached
-                updates.append({"id": row_id, "city": city, "country": country})
-                stats.from_cache += 1
-                if verbose:
-                    _log("enrich_row", id=row_id, name=name, source="cache",
-                         city=city, country=country, confidence=confidence)
-                continue
-
-        if key in memo:
-            result = memo[key]
-            src = "memo"
+        if client:
+            try:
+                city, country = _ask_model(client, model, name, address)
+            except Exception:
+                city, country = _fallback_extract(name, address)
         else:
-            result = client.extract(row)
-            cache.put(key, result.city, result.country, result.confidence, result.evidence)
-            memo[key] = result
-            stats.api_calls += 1
-            src = "openai"
+            city, country = _fallback_extract(name, address)
 
-        updates.append({"id": row_id, "city": result.city, "country": result.country})
+        # Trim empties to "" to let MERGE guards ignore them
+        out = {
+            "id": rid,
+            "city": (city or "").strip(),
+            "country": (country or "").strip(),
+        }
         if verbose:
-            _log("enrich_row", id=row_id, name=name, source=src,
-                 city=result.city, country=result.country, confidence=result.confidence)
+            print({"event": "enrich_row", "id": rid, "city": out["city"], "country": out["country"]})
+        return out
 
-    if verbose:
-        _log("enrich_done", processed=stats.processed, from_cache=stats.from_cache,
-             api_calls=stats.api_calls, updated=len(updates))
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as ex:
+        futs = [ex.submit(_enrich_row, r) for r in rows]
+        for f in as_completed(futs):
+            results.append(f.result())
 
-    return updates
+    return results
