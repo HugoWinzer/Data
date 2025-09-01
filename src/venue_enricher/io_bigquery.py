@@ -3,42 +3,70 @@ from __future__ import annotations
 from typing import Any, Dict, List
 from google.cloud import bigquery as bq
 
-SELECT_TEMPLATE = """
-SELECT id, name, alt_name, website_url, domain, linkedin_url, phone, ticket_vendor, ticket_vendor_source
-FROM `{project}.{dataset}.{table}`
-WHERE enrichment_status='OK' AND (city IS NULL OR country IS NULL)
-ORDER BY id
-LIMIT {limit}
-"""
 
-def fetch_rows(project: str, dataset: str, table: str, limit: int) -> List[Dict[str, Any]]:
-    client = bq.Client(project=project)
-    sql = SELECT_TEMPLATE.format(project=project, dataset=dataset, table=table, limit=limit)
-    res = client.query(sql).result()
-    return [dict(r) for r in res]
+def _table(project_id: str, dataset_id: str, table_id: str) -> str:
+    return f"{project_id}.{dataset_id}.{table_id}"
 
-def update_locations(project: str, dataset: str, table: str, updates: List[Dict[str, Any]]) -> int:
+
+def fetch_rows(project_id: str, dataset_id: str, table_id: str, limit: int) -> List[Dict[str, Any]]:
+    """Return rows needing enrichment. Why: pull only fields useful for GPT + key."""
+    client = bq.Client(project=project_id)
+    sql = f"""
+    SELECT
+      id, name, alt_name, website_url, domain, linkedin_url, phone
+    FROM `{_table(project_id, dataset_id, table_id)}`
+    WHERE enrichment_status = 'OK' AND (city IS NULL OR country IS NULL)
+    LIMIT @limit
+    """
+    job = client.query(
+        sql,
+        job_config=bq.QueryJobConfig(
+            query_parameters=[bq.ScalarQueryParameter("limit", "INT64", limit)]
+        ),
+    )
+    rows: List[Dict[str, Any]] = []
+    for row in job.result():
+        rows.append({k: row[k] for k in row.keys()})
+    return rows
+
+
+def update_locations(
+    project_id: str,
+    dataset_id: str,
+    table_id: str,
+    updates: List[Dict[str, Any]],
+) -> int:
+    """
+    Update city/country using a single DML statement with an array-of-struct param.
+    Why: ensures `id` (STRING) matches correctly and returns *actual* affected rows.
+    """
     if not updates:
         return 0
-    client = bq.Client(project=project)
 
-    temp = f"{project}.{dataset}._tmp_city_country"
-    schema = [
-        bq.SchemaField("id", "STRING"),
-        bq.SchemaField("city", "STRING"),
-        bq.SchemaField("country", "STRING"),
-    ]
-    job = client.load_table_from_json(updates, temp, job_config=bq.LoadJobConfig(schema=schema, write_disposition="WRITE_TRUNCATE"))
-    job.result()
+    # Build (id, city, country) tuples; force id to STRING
+    values = [(str(u["id"]), u.get("city"), u.get("country")) for u in updates]
 
-    merge_sql = f"""
-    MERGE `{project}.{dataset}.{table}` T
-    USING `{temp}` S
-    ON T.id = S.id
-    WHEN MATCHED THEN UPDATE SET
-      T.city = S.city,
-      T.country = S.country
+    client = bq.Client(project=project_id)
+    job_config = bq.QueryJobConfig(
+        query_parameters=[
+            bq.ArrayQueryParameter(
+                "rows",
+                "STRUCT<id STRING, city STRING, country STRING>",
+                values,
+            )
+        ]
+    )
+
+    sql = f"""
+    UPDATE `{_table(project_id, dataset_id, table_id)}` T
+    SET
+      T.city = R.city,
+      T.country = R.country,
+      T.last_updated = CURRENT_TIMESTAMP()
+    FROM UNNEST(@rows) AS R
+    WHERE T.id = R.id
     """
-    client.query(merge_sql).result()
-    client.delete_table(temp, not_found_ok=True)
-    return len(updates)
+
+    job = client.query(sql, job_config=job_config)
+    job.result()  # wait for completion
+    return int(job.num_dml_affected_rows or 0)
