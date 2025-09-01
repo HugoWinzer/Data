@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 from fastapi import FastAPI, Query
 from venue_enricher.bq_io import BigQueryIO
 from venue_enricher.enricher import enrich_batch
 
-app = FastAPI(title="venue-enricher", version="1.0.0")
+app = FastAPI(title="venue-enricher", version="1.0.1")
 
 PROJECT_ID = os.environ.get("PROJECT_ID", "")
 DATASET_ID = os.environ.get("DATASET_ID", "")
@@ -17,7 +17,7 @@ TABLE_ID = os.environ.get("TABLE_ID", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "200"))
 CONCURRENCY = int(os.environ.get("CONCURRENCY", "8"))
-BQ_LOCATION = os.environ.get("BQ_LOCATION")  # optional (e.g., "US")
+BQ_LOCATION = os.environ.get("BQ_LOCATION")  # e.g. "US" if your dataset is pinned
 
 bq = BigQueryIO(PROJECT_ID, DATASET_ID, TABLE_ID, location=BQ_LOCATION)
 
@@ -34,6 +34,7 @@ def health() -> Dict[str, Any]:
 
 @app.get("/stats")
 def stats() -> Dict[str, Any]:
+    # Why: Disable result cache to see fresh counts after MERGE
     pending = bq.count_pending()
     return {"pending": pending}
 
@@ -45,8 +46,8 @@ def enrich(
     verbose: bool = Query(False),
 ) -> Dict[str, Any]:
     """
-    Batch endpoint. Streams rows -> enrich -> MERGE.
-    Why: Return real affected rows so ops can verify pending drops per run.
+    Returns the actual number of rows modified in BigQuery.
+    Why: Affected rows proves pending will drop.
     """
     total_affected = 0
     remaining = limit
@@ -57,17 +58,13 @@ def enrich(
         if n <= 0:
             break
 
-        # Fetch
         rows = bq.fetch_rows(limit=n, overwrite=overwrite)
         if not rows:
             break
 
-        # Enrich
         updates = enrich_batch(
             rows, model=OPENAI_MODEL, concurrency=CONCURRENCY, verbose=verbose
         )
-
-        # Persist
         affected = bq.update_locations(updates, overwrite=overwrite)
         total_affected += affected
         remaining -= n
