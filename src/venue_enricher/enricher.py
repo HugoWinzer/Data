@@ -16,11 +16,10 @@ class EnrichStats:
 
 
 def _log(event: str, **fields: Any) -> None:
-    """Emit one-line JSON for Cloud Logging. Why: easy to filter/parse."""
+    # One-line JSON; easy to filter in Cloud Logging
     try:
         print(json.dumps({"event": event, **fields}, ensure_ascii=False))
     except Exception:
-        # Fallback plain text if any value is not JSON-serializable.
         print(f"{event} {fields}")
 
 
@@ -29,7 +28,7 @@ def enrich_rows(
     client: GPTClient,
     cache: EnrichmentCache,
     overwrite: bool = False,
-    verbose: bool = False,
+    verbose: bool = True,
 ) -> List[Dict[str, Any]]:
     row_list = list(rows)
     updates: List[Dict[str, Any]] = []
@@ -42,58 +41,37 @@ def enrich_rows(
     for row in row_list:
         stats.processed += 1
         row_id = row.get("id")
-        name = row.get("name") or ""
+        name = (row.get("name") or "")[:200]
         key = cache.make_key(row)
 
-        source = "openai"
         if not overwrite:
             cached = cache.get(key)
             if cached:
-                city, country, confidence, evidence = cached
-                stats.from_cache += 1
-                source = "cache"
+                city, country, confidence, _ = cached
                 updates.append({"id": row_id, "city": city, "country": country})
+                stats.from_cache += 1
                 if verbose:
-                    _log(
-                        "enrich_row",
-                        id=row_id,
-                        name=name,
-                        source=source,
-                        city=city,
-                        country=country,
-                        confidence=confidence,
-                    )
+                    _log("enrich_row", id=row_id, name=name, source="cache",
+                         city=city, country=country, confidence=confidence)
                 continue
 
         if key in memo:
             result = memo[key]
-            source = "memo"
+            src = "memo"
         else:
             result = client.extract(row)
             cache.put(key, result.city, result.country, result.confidence, result.evidence)
             memo[key] = result
             stats.api_calls += 1
-            source = "openai"
+            src = "openai"
 
         updates.append({"id": row_id, "city": result.city, "country": result.country})
         if verbose:
-            _log(
-                "enrich_row",
-                id=row_id,
-                name=name,
-                source=source,
-                city=result.city,
-                country=result.country,
-                confidence=result.confidence,
-            )
+            _log("enrich_row", id=row_id, name=name, source=src,
+                 city=result.city, country=result.country, confidence=result.confidence)
 
     if verbose:
-        _log(
-            "enrich_done",
-            processed=stats.processed,
-            from_cache=stats.from_cache,
-            api_calls=stats.api_calls,
-            updated=len(updates),
-        )
+        _log("enrich_done", processed=stats.processed, from_cache=stats.from_cache,
+             api_calls=stats.api_calls, updated=len(updates))
 
     return updates
