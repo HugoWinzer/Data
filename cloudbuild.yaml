@@ -14,26 +14,35 @@ options:
   logging: CLOUD_LOGGING_ONLY
 
 steps:
+  # 1) Build & push container
   - name: "gcr.io/cloud-builders/docker"
-    args: ["build",
-      "-t","${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
-      "."]
+    args:
+      [
+        "build",
+        "-t",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
+        ".",
+      ]
 
   - name: "gcr.io/cloud-builders/docker"
-    args: ["push",
-      "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}"]
+    args:
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
+      ]
 
+  # 2) Migration: add columns (no $SQL var; inline to avoid substitution errors)
   - name: "gcr.io/cloud-builders/gcloud"
     entrypoint: "bash"
     args:
       - "-c"
-      - |
-        set -euo pipefail
-        SQL="ALTER TABLE \`${PROJECT_ID}.${_DATASET}.${_TABLE}\`
-             ADD COLUMN IF NOT EXISTS city STRING,
-             ADD COLUMN IF NOT EXISTS country STRING"
-        bq query --use_legacy_sql=false "$SQL"
+      - >
+        bq query --use_legacy_sql=false
+        "ALTER TABLE \`${PROJECT_ID}.${_DATASET}.${_TABLE}\`
+         ADD COLUMN IF NOT EXISTS city STRING,
+         ADD COLUMN IF NOT EXISTS country STRING"
 
+  # 3) Deploy to Cloud Run
   - name: "gcr.io/cloud-builders/gcloud"
     args:
       [
