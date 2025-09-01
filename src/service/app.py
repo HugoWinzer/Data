@@ -1,67 +1,83 @@
-# file: src/service/app.py
+# path: src/service/app.py
 from __future__ import annotations
-from fastapi import FastAPI, HTTPException, Query
-from google.cloud import bigquery as bq
 
-from venue_enricher.config import Settings
-from venue_enricher.gpt_client import GPTClient
-from venue_enricher.cache import EnrichmentCache
-from venue_enricher.enricher import enrich_rows
-from venue_enricher import io_bigquery as bqio
+import math
+import os
+from typing import Dict, Any, List
 
-app = FastAPI(title="Venue City/Country Enricher", version="1.2.0")
-cfg = Settings()
+from fastapi import FastAPI, Query
+from venue_enricher.bq_io import BigQueryIO
+from venue_enricher.enricher import enrich_batch
+
+app = FastAPI(title="venue-enricher", version="1.0.0")
+
+PROJECT_ID = os.environ.get("PROJECT_ID", "")
+DATASET_ID = os.environ.get("DATASET_ID", "")
+TABLE_ID = os.environ.get("TABLE_ID", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "200"))
+CONCURRENCY = int(os.environ.get("CONCURRENCY", "8"))
+BQ_LOCATION = os.environ.get("BQ_LOCATION")  # optional (e.g., "US")
+
+bq = BigQueryIO(PROJECT_ID, DATASET_ID, TABLE_ID, location=BQ_LOCATION)
 
 
 @app.get("/health")
-def health():
-    return {"ok": True, "project": cfg.project_id, "dataset": cfg.dataset_id, "table": cfg.table_id}
+def health() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "project": PROJECT_ID,
+        "dataset": DATASET_ID,
+        "table": TABLE_ID,
+    }
 
 
 @app.get("/stats")
-def stats():
-    if not (cfg.project_id and cfg.dataset_id and cfg.table_id):
-        raise HTTPException(status_code=500, detail="PROJECT_ID/DATASET_ID/TABLE_ID must be set")
-    client = bq.Client(project=cfg.project_id)
-    sql = f"""
-      SELECT COUNT(*) AS c
-      FROM `{cfg.project_id}.{cfg.dataset_id}.{cfg.table_id}`
-      WHERE enrichment_status='OK' AND (city IS NULL OR country IS NULL)
-    """
-    c = client.query(sql).result().to_dataframe()["c"][0]
-    return {"pending": int(c)}
+def stats() -> Dict[str, Any]:
+    pending = bq.count_pending()
+    return {"pending": pending}
 
 
 @app.post("/enrich")
-def run_enrichment(
-    limit: int = Query(30000, ge=1, le=100000),
+def enrich(
+    limit: int = Query(1000, ge=1, le=5000),
     overwrite: bool = Query(False),
-    verbose: bool = Query(True),
-):
-    if not (cfg.project_id and cfg.dataset_id and cfg.table_id):
-        raise HTTPException(status_code=500, detail="PROJECT_ID/DATASET_ID/TABLE_ID must be set")
+    verbose: bool = Query(False),
+) -> Dict[str, Any]:
+    """
+    Batch endpoint. Streams rows -> enrich -> MERGE.
+    Why: Return real affected rows so ops can verify pending drops per run.
+    """
+    total_affected = 0
+    remaining = limit
+    batches = max(1, math.ceil(limit / max(1, BATCH_SIZE)))
 
-    rows = bqio.fetch_rows(cfg.project_id, cfg.dataset_id, cfg.table_id, limit)
-    if not rows:
-        return {"updated": 0, "message": "No rows to enrich."}
+    for _ in range(batches):
+        n = min(BATCH_SIZE, remaining)
+        if n <= 0:
+            break
 
-    client = GPTClient(
-        api_key=cfg.openai_api_key,
-        model=cfg.openai_model,
-        max_tokens=cfg.max_tokens,
-        prompt_version=cfg.prompt_version,
-    )
-    cache = EnrichmentCache()
+        # Fetch
+        rows = bq.fetch_rows(limit=n, overwrite=overwrite)
+        if not rows:
+            break
 
-    updates = enrich_rows(rows, client, cache, overwrite=overwrite, verbose=verbose)
+        # Enrich
+        updates = enrich_batch(
+            rows, model=OPENAI_MODEL, concurrency=CONCURRENCY, verbose=verbose
+        )
 
-    updated_total = 0
-    start = 0
-    batch_size = cfg.batch_size  # 200 by env
-    while start < len(updates):
-        chunk = updates[start : start + batch_size]
-        affected = bqio.update_locations(cfg.project_id, cfg.dataset_id, cfg.table_id, chunk)
-        updated_total += affected
-        start += batch_size
+        # Persist
+        affected = bq.update_locations(updates, overwrite=overwrite)
+        total_affected += affected
+        remaining -= n
 
-    return {"updated": updated_total, "limit": limit, "batch_size": batch_size}
+        if verbose:
+            print({"event": "batch_done", "asked": n, "affected": affected})
+
+    return {
+        "updated": total_affected,
+        "limit": limit,
+        "batch_size": BATCH_SIZE,
+        "overwrite": overwrite,
+    }
