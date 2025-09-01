@@ -1,22 +1,20 @@
 # file: cloudbuild.yaml
-# Cloud Build pipeline: build image, migrate BigQuery columns, deploy to Cloud Run
-# Configure a trigger to run this file on pushes to main.
 substitutions:
-  # ⚙️ Update these 3 values to your environment (once) in the Cloud Build trigger UI.
-  _REGION: "us-central1"
-  _SERVICE: "venue-enricher"
-  _DATASET: "my_dataset"
-  _TABLE: "venues"
-  _REPOSITORY: "app"  # Artifact Registry repo name (create once)
+  _REGION: "us-central1"                        # change if needed
+  _SERVICE: "venue-enricher"                    # Cloud Run service name
+  _DATASET: "rfpdata"
+  _TABLE: "OUTPUT"
+  _REPOSITORY: "app"                            # Artifact Registry repo name
   _OPENAI_MODEL: "gpt-4o-mini"
   _BATCH_SIZE: "200"
   _CONCURRENCY: "8"
+  _RUN_SA: "rfp-enricher-sa@rfp-database-464609.iam.gserviceaccount.com"
 
 options:
   logging: CLOUD_LOGGING_ONLY
 
 steps:
-  # 1) Build & push image to Artifact Registry
+  # 1) Build + push
   - name: "gcr.io/cloud-builders/docker"
     args:
       [
@@ -25,7 +23,6 @@ steps:
         "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
         ".",
       ]
-
   - name: "gcr.io/cloud-builders/docker"
     args:
       [
@@ -33,7 +30,7 @@ steps:
         "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
       ]
 
-  # 2) Migration: add city/country columns if missing
+  # 2) Migration: add `city` and `country`
   - name: "gcr.io/cloud-builders/gcloud"
     entrypoint: "bash"
     args:
@@ -45,7 +42,7 @@ steps:
              ADD COLUMN IF NOT EXISTS country STRING"
         bq query --use_legacy_sql=false "$SQL"
 
-  # 3) Deploy to Cloud Run (uses the OpenAI API key from Secret Manager)
+  # 3) Deploy to Cloud Run
   - name: "gcr.io/cloud-builders/gcloud"
     args:
       [
@@ -59,11 +56,10 @@ steps:
         "--cpu","1",
         "--memory","512Mi",
         "--timeout","3600",
-        # Runtime env:
+        "--service-account","${_RUN_SA}",
         "--set-env-vars","PROJECT_ID=${PROJECT_ID},DATASET_ID=${_DATASET},TABLE_ID=${_TABLE},OPENAI_MODEL=${_OPENAI_MODEL},BATCH_SIZE=${_BATCH_SIZE},CONCURRENCY=${_CONCURRENCY}",
-        # Secret: store a secret named OPENAI_API_KEY in Secret Manager once.
         "--set-secrets","OPENAI_API_KEY=OPENAI_API_KEY:latest",
       ]
 
 images:
-  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}"
+  - "${_REGIO_
