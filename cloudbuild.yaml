@@ -1,3 +1,4 @@
+# run this in ~/Data
 cat > cloudbuild.yaml <<'YAML'
 substitutions:
   _REGION: "us-central1"
@@ -14,24 +15,25 @@ options:
   logging: CLOUD_LOGGING_ONLY
 
 steps:
-  # 1) Build & push image
+  # 1) Build image
   - name: "gcr.io/cloud-builders/docker"
     args:
       [
         "build",
         "-t",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${BUILD_ID}",
         ".",
       ]
 
+  # 2) Push image
   - name: "gcr.io/cloud-builders/docker"
     args:
       [
         "push",
-        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
+        "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${BUILD_ID}",
       ]
 
-  # 2) Migration: add columns (inline query; no $SQL variable)
+  # 3) Add city/country columns (inline SQL; no $SQL var)
   - name: "gcr.io/cloud-builders/gcloud"
     entrypoint: "bash"
     args:
@@ -42,12 +44,12 @@ steps:
          ADD COLUMN IF NOT EXISTS city STRING,
          ADD COLUMN IF NOT EXISTS country STRING"
 
-  # 3) Deploy to Cloud Run
+  # 4) Deploy to Cloud Run
   - name: "gcr.io/cloud-builders/gcloud"
     args:
       [
         "run","deploy","${_SERVICE}",
-        "--image","${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}",
+        "--image","${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${BUILD_ID}",
         "--region","${_REGION}",
         "--platform","managed",
         "--allow-unauthenticated",
@@ -62,5 +64,5 @@ steps:
       ]
 
 images:
-  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${COMMIT_SHA}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE}:${BUILD_ID}"
 YAML
