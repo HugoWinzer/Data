@@ -7,8 +7,8 @@ import sqlite3
 from typing import Any, Dict, Optional, Tuple
 
 class EnrichmentCache:
-    # Why: saves tokens by memoizing repeated/near-identical rows within a run.
-    def __init__(self, path: str = ".cache_db/enrichment_cache.sqlite") -> None:
+    # Writes to /tmp (writable in Cloud Run)
+    def __init__(self, path: str = "/tmp/enrichment_cache.sqlite") -> None:
         self.path = path
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.conn = sqlite3.connect(path)
